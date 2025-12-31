@@ -54,11 +54,13 @@ class KernelSUApplication : Application(), ViewModelStoreOwner {
             webroot.mkdir()
         }
 
-        // Provide working env for rust's temp_dir()
-        Os.setenv("TMPDIR", cacheDir.absolutePath, true)
+        // 修改：设置 TMPDIR 到只读目录（filesDir），避免 DEX 在可写 cacheDir
+        // 原始：Os.setenv("TMPDIR", cacheDir.absolutePath, true)
+        Os.setenv("TMPDIR", filesDir.absolutePath, true)  // 或移除此行，使用系统默认
 
         okhttpClient =
-            OkHttpClient.Builder().cache(Cache(File(cacheDir, "okhttp"), 10 * 1024 * 1024))
+            OkHttpClient.Builder()
+                .cache(Cache(File(filesDir, "okhttp"), 10 * 1024 * 1024))  // 可选：缓存移到 filesDir
                 .addInterceptor { block ->
                     block.proceed(
                         block.request().newBuilder()
