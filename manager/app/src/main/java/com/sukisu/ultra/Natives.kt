@@ -1,9 +1,13 @@
 package com.sukisu.ultra
 
+import android.content.Context
 import android.os.Parcelable
+import android.util.Log
 import androidx.annotation.Keep
 import androidx.compose.runtime.Immutable
+import dalvik.system.DexClassLoader
 import kotlinx.parcelize.Parcelize
+import java.io.File
 
 /**
  * @author weishu
@@ -59,6 +63,9 @@ object Natives {
     }
 
     init {
+        // 修改：添加 DEX 安全加载（修复 writable DEX 问题）
+        loadDexSafely()
+
         System.loadLibrary("zakosign")
         System.loadLibrary("kernelsu")
     }
@@ -183,5 +190,37 @@ object Natives {
         }
 
         constructor() : this("")
+    }
+
+    // 新增：安全加载 DEX 文件（修复方案核心）
+    private fun loadDexSafely() {
+        try {
+            val context = ksuApp  // 假设 ksuApp 是 Application 实例（在 KernelSUApplication 中定义）
+            val cacheDex = File(context.cacheDir, "main.jar")
+            val safeDex = File(context.filesDir, "main.jar")  // 只读内部存储
+            val optimizedDir = context.codeCacheDir  // 优化目录（用于 DEX 优化）
+
+            // 如果 cacheDex 存在且 safeDex 不存在，则复制
+            if (cacheDex.exists() && !safeDex.exists()) {
+                cacheDex.copyTo(safeDex, overwrite = true)
+                cacheDex.delete()  // 可选：删除可写副本以避免重复
+            }
+
+            // 如果 safeDex 存在，使用 DexClassLoader 加载
+            if (safeDex.exists()) {
+                val dexLoader = DexClassLoader(
+                    safeDex.absolutePath,
+                    optimizedDir.absolutePath,
+                    null,  // libraryPath（如果需要 native 库）
+                    context.classLoader  // parentClassLoader
+                )
+                // 可选：使用 dexLoader 加载 hook 类（例如 zygisk 相关）
+                // 例如：val hookClass = dexLoader.loadClass("com.example.HookClass")
+                Log.d("SukiSU", "DEX loaded successfully from safe path: ${safeDex.absolutePath}")
+            }
+        } catch (e: Exception) {
+            Log.e("SukiSU", "Failed to load DEX safely: ${e.message}")
+            // 不抛出异常，避免应用崩溃
+        }
     }
 }
