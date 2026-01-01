@@ -1,17 +1,16 @@
 package com.sukisu.ultra
 
 import android.app.Application
-import android.system.Os
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import com.sukisu.ultra.ui.viewmodel.SuperUserViewModel
 import coil.Coil
 import coil.ImageLoader
 import com.dergoogler.mmrl.platform.Platform
+import com.sukisu.ultra.ui.viewmodel.SuperUserViewModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import me.zhanghai.android.appiconloader.coil.AppIconFetcher
 import me.zhanghai.android.appiconloader.coil.AppIconKeyer
 import okhttp3.Cache
@@ -54,13 +53,16 @@ class KernelSUApplication : Application(), ViewModelStoreOwner {
             webroot.mkdir()
         }
 
-        // 修改：设置 TMPDIR 到只读目录（filesDir），避免 DEX 在可写 cacheDir
-        // 原始：Os.setenv("TMPDIR", cacheDir.absolutePath, true)
-        Os.setenv("TMPDIR", filesDir.absolutePath, true)  // 或移除此行，使用系统默认
+        // IMPORTANT:
+        // Do NOT override TMPDIR. On Android 15/16+, writable dex/jar generated under
+        // app-private writable dirs (cacheDir/filesDir) may cause ART to abort when loaded.
+        // Keep system default behavior.
 
         okhttpClient =
             OkHttpClient.Builder()
-                .cache(Cache(File(filesDir, "okhttp"), 10 * 1024 * 1024))  // 可选：缓存移到 filesDir
+                // Cache belongs in cacheDir; it is not related to dex/jar loading, and should not
+                // pollute filesDir.
+                .cache(Cache(File(cacheDir, "okhttp"), 10 * 1024 * 1024))
                 .addInterceptor { block ->
                     block.proceed(
                         block.request().newBuilder()
@@ -69,6 +71,7 @@ class KernelSUApplication : Application(), ViewModelStoreOwner {
                     )
                 }.build()
     }
+
     override val viewModelStore: ViewModelStore
         get() = appViewModelStore
 }
