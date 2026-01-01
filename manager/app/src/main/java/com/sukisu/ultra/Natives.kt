@@ -14,6 +14,8 @@ import java.io.File
  * @date 2022/12/8.
  */
 object Natives {
+    private const val TAG = "Natives"
+
     // minimal supported kernel version
     // 10915: allowlist breaking change, add app profile
     // 10931: app profile struct add 'version' field
@@ -37,9 +39,72 @@ object Natives {
     const val ROOT_UID = 0
     const val ROOT_GID = 0
 
-    // 获取完整版本号
+    // --- 安全初始化逻辑 ---
+    @Volatile
+    private var isInitialized = false
+
+    /**
+     * 安全地初始化 DEX 和 native 库。
+     * 必须在 Application.onCreate() 或之后调用。
+     */
+    fun initialize(context: Context) {
+        if (isInitialized) return
+        synchronized(this) {
+            if (isInitialized) return
+
+            try {
+                loadDexSafely(context)
+                System.loadLibrary("zakosign")
+                System.loadLibrary("kernelsu")
+                isInitialized = true
+                Log.d(TAG, "Native libraries and DEX loaded successfully.")
+            } catch (e: Throwable) {
+                Log.e(TAG, "Failed to initialize native components", e)
+                throw RuntimeException("Native initialization failed", e)
+            }
+        }
+    }
+
+    // --- Native 方法声明 (保持原始签名) ---
     external fun getFullVersion(): String
 
+    val version: Int
+        external get
+
+    val allowList: IntArray
+        external get
+
+    val isSafeMode: Boolean
+        external get
+
+    val isLkmMode: Boolean
+        external get
+
+    val isManager: Boolean
+        external get
+
+    external fun uidShouldUmount(uid: Int): Boolean
+
+    external fun getAppProfile(key: String?, uid: Int): Profile
+    external fun setAppProfile(profile: Profile?): Boolean
+
+    external fun isSuEnabled(): Boolean
+    external fun setSuEnabled(enabled: Boolean): Boolean
+
+    external fun isKernelUmountEnabled(): Boolean
+    external fun setKernelUmountEnabled(enabled: Boolean): Boolean
+
+    external fun isEnhancedSecurityEnabled(): Boolean
+    external fun setEnhancedSecurityEnabled(enabled: Boolean): Boolean
+
+    external fun isKPMEnabled(): Boolean
+    external fun getHookType(): String
+
+    external fun verifyModuleSignature(modulePath: String): Boolean
+
+    external fun getUserName(uid: Int): String?
+
+    // --- 工具方法 ---
     fun isVersionLessThan(v1Full: String, v2Full: String): Boolean {
         fun extractVersionParts(version: String): List<Int> {
             val match = Regex("""v\d+(\.\d+)*""").find(version)
@@ -62,75 +127,6 @@ object Natives {
         Regex("""v\d+(\.\d+)*""").find(version)?.value ?: version
     }
 
-    init {
-        // 修改：添加 DEX 安全加载（修复 writable DEX 问题）
-        loadDexSafely()
-
-        System.loadLibrary("zakosign")
-        System.loadLibrary("kernelsu")
-    }
-
-    val version: Int
-        external get
-
-    // get the uid list of allowed su processes.
-    val allowList: IntArray
-        external get
-
-    val isSafeMode: Boolean
-        external get
-
-    val isLkmMode: Boolean
-        external get
-
-    val isManager: Boolean
-        external get
-
-    external fun uidShouldUmount(uid: Int): Boolean
-
-    /**
-     * Get the profile of the given package.
-     * @param key usually the package name
-     * @return return null if failed.
-     */
-    external fun getAppProfile(key: String?, uid: Int): Profile
-    external fun setAppProfile(profile: Profile?): Boolean
-
-    /**
-     * `su` compat mode can be disabled temporarily.
-     *  0: disabled
-     *  1: enabled
-     *  negative : error
-     */
-    external fun isSuEnabled(): Boolean
-    external fun setSuEnabled(enabled: Boolean): Boolean
-
-    /**
-     * Kernel module umount can be disabled temporarily.
-     *  0: disabled
-     *  1: enabled
-     *  negative : error
-     */
-    external fun isKernelUmountEnabled(): Boolean
-    external fun setKernelUmountEnabled(enabled: Boolean): Boolean
-
-    /**
-     * Enhanced security can be enabled/disabled.
-     *  0: disabled
-     *  1: enabled
-     *  negative : error
-     */
-    external fun isEnhancedSecurityEnabled(): Boolean
-    external fun setEnhancedSecurityEnabled(enabled: Boolean): Boolean
-
-    external fun isKPMEnabled(): Boolean
-    external fun getHookType(): String
-
-    // 模块签名验证
-    external fun verifyModuleSignature(modulePath: String): Boolean
-
-    external fun getUserName(uid: Int): String?
-    
     private const val NON_ROOT_DEFAULT_PROFILE_KEY = "$"
     private const val NOBODY_UID = 9999
 
@@ -160,16 +156,9 @@ object Natives {
     @Parcelize
     @Keep
     data class Profile(
-        // and there is a default profile for root and non-root
         val name: String,
-        // current uid for the package, this is convivent for kernel to check
-        // if the package name doesn't match uid, then it should be invalidated.
         val currentUid: Int = 0,
-
-        // if this is true, kernel will grant root permission to this package
         val allowSu: Boolean = false,
-
-        // these are used for root profile
         val rootUseDefault: Boolean = true,
         val rootTemplate: String? = null,
         val uid: Int = ROOT_UID,
@@ -178,10 +167,9 @@ object Natives {
         val capabilities: List<Int> = mutableListOf(),
         val context: String = KERNEL_SU_DOMAIN,
         val namespace: Int = Namespace.INHERITED.ordinal,
-
         val nonRootUseDefault: Boolean = true,
         val umountModules: Boolean = true,
-        var rules: String = "", // this field is save in ksud!!
+        var rules: String = "",
     ) : Parcelable {
         enum class Namespace {
             INHERITED,
@@ -192,35 +180,29 @@ object Natives {
         constructor() : this("")
     }
 
-    // 新增：安全加载 DEX 文件（修复方案核心）
-    private fun loadDexSafely() {
+    // --- DEX 安全加载 ---
+    private fun loadDexSafely(context: Context) {
         try {
-            val context = ksuApp  // 假设 ksuApp 是 Application 实例（在 KernelSUApplication 中定义）
             val cacheDex = File(context.cacheDir, "main.jar")
-            val safeDex = File(context.filesDir, "main.jar")  // 只读内部存储
-            val optimizedDir = context.codeCacheDir  // 优化目录（用于 DEX 优化）
+            val safeDex = File(context.filesDir, "main.jar")
+            val optimizedDir = context.codeCacheDir
 
-            // 如果 cacheDex 存在且 safeDex 不存在，则复制
             if (cacheDex.exists() && !safeDex.exists()) {
                 cacheDex.copyTo(safeDex, overwrite = true)
-                cacheDex.delete()  // 可选：删除可写副本以避免重复
+                cacheDex.delete()
             }
 
-            // 如果 safeDex 存在，使用 DexClassLoader 加载
             if (safeDex.exists()) {
-                val dexLoader = DexClassLoader(
+                DexClassLoader(
                     safeDex.absolutePath,
                     optimizedDir.absolutePath,
-                    null,  // libraryPath（如果需要 native 库）
-                    context.classLoader  // parentClassLoader
+                    null,
+                    context.classLoader
                 )
-                // 可选：使用 dexLoader 加载 hook 类（例如 zygisk 相关）
-                // 例如：val hookClass = dexLoader.loadClass("com.example.HookClass")
-                Log.d("SukiSU", "DEX loaded successfully from safe path: ${safeDex.absolutePath}")
+                Log.d(TAG, "DEX loaded successfully from safe path: ${safeDex.absolutePath}")
             }
         } catch (e: Exception) {
-            Log.e("SukiSU", "Failed to load DEX safely: ${e.message}")
-            // 不抛出异常，避免应用崩溃
+            Log.e(TAG, "Failed to load DEX safely", e)
         }
     }
 }

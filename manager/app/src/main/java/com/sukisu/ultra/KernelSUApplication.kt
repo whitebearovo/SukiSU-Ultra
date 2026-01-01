@@ -18,8 +18,6 @@ import okhttp3.OkHttpClient
 import java.io.File
 import java.util.Locale
 
-lateinit var ksuApp: KernelSUApplication
-
 class KernelSUApplication : Application(), ViewModelStoreOwner {
 
     lateinit var okhttpClient: OkHttpClient
@@ -27,14 +25,8 @@ class KernelSUApplication : Application(), ViewModelStoreOwner {
 
     override fun onCreate() {
         super.onCreate()
-        ksuApp = this
 
-        // For faster response when first entering superuser or webui activity
-        val superUserViewModel = ViewModelProvider(this)[SuperUserViewModel::class.java]
-        CoroutineScope(Dispatchers.Main).launch {
-            superUserViewModel.fetchAppList()
-        }
-
+        // === 第一阶段：初始化纯 Java/Kotlin 组件 ===
         Platform.setHiddenApiExemptions()
 
         val context = this
@@ -53,23 +45,25 @@ class KernelSUApplication : Application(), ViewModelStoreOwner {
             webroot.mkdir()
         }
 
-        // IMPORTANT:
-        // Do NOT override TMPDIR. On Android 15/16+, writable dex/jar generated under
-        // app-private writable dirs (cacheDir/filesDir) may cause ART to abort when loaded.
-        // Keep system default behavior.
+        okhttpClient = OkHttpClient.Builder()
+            .cache(Cache(File(cacheDir, "okhttp"), 10 * 1024 * 1024))
+            .addInterceptor { block ->
+                block.proceed(
+                    block.request().newBuilder()
+                        .header("User-Agent", "SukiSU/${BuildConfig.VERSION_CODE}")
+                        .header("Accept-Language", Locale.getDefault().toLanguageTag()).build()
+                )
+            }
+            .build()
 
-        okhttpClient =
-            OkHttpClient.Builder()
-                // Cache belongs in cacheDir; it is not related to dex/jar loading, and should not
-                // pollute filesDir.
-                .cache(Cache(File(cacheDir, "okhttp"), 10 * 1024 * 1024))
-                .addInterceptor { block ->
-                    block.proceed(
-                        block.request().newBuilder()
-                            .header("User-Agent", "SukiSU/${BuildConfig.VERSION_CODE}")
-                            .header("Accept-Language", Locale.getDefault().toLanguageTag()).build()
-                    )
-                }.build()
+        // === 第二阶段：安全初始化 Native 库（关键修复点）===
+        Natives.initialize(this)
+
+        // === 第三阶段：启动业务逻辑（此时 Native 已就绪）===
+        val superUserViewModel = ViewModelProvider(this)[SuperUserViewModel::class.java]
+        CoroutineScope(Dispatchers.Main).launch {
+            superUserViewModel.fetchAppList()
+        }
     }
 
     override val viewModelStore: ViewModelStore
